@@ -5,42 +5,91 @@ import { createBookFromForm } from "./task4-integration";
 import { filterByTitle, sortBooks } from './task5-utils';
 import { BookCatalog } from './task6-classes';
 import { Wishlist } from './task7-wishlist';
+import { fetchBooks, saveBooks } from './mock-api';
+
+type AsyncState<T> =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success', data: T }
+  | { status: 'error', message: string };
+
+let state: AsyncState<Book[]> = { status: 'loading' };
+let formErrorMessage = ''
 
 // ============================================================
 // ИСХОДНОЕ СОСТОЯНИЕ
 // ============================================================
-let catalog = new BookCatalog('main', [
-  { id: '1', title: 'TypeScript Guide', authors: ['John Doe'], year: 2024 },
-  { id: '2', title: 'JavaScript Basics', authors: ['Jane Smith'], year: 2022 },
-]);
-
+let catalog = new BookCatalog('main', []);
 let wishlist = new Wishlist();
 
-// Загрузка из localStorage (в практике 4-1 переедет в mock-api.ts)
-const savedCatalog = localStorage.getItem('catalog');
-if (savedCatalog) {
-  const parsed = JSON.parse(savedCatalog);
-  catalog = new BookCatalog(parsed.id, parsed.books);
+function render() {
+  const bookList = document.querySelector('#bookList') as HTMLDivElement;
+  const errorMessage = document.querySelector('#errorMessage') as HTMLDivElement;
+
+  // Отображение временной ошибки формы
+  if (formErrorMessage) {
+    errorMessage.textContent = formErrorMessage;
+    errorMessage.style.color = 'red';
+  } else {
+    errorMessage.textContent = '';
+  }
+
+  switch (state.status) {
+    case 'idle':
+      bookList.innerHTML = '';
+      bookList.textContent = 'Инициализация приложения...';
+      break;
+      
+    case 'loading':
+      bookList.innerHTML = '';
+      bookList.textContent = 'Загрузка данных...';
+      break;
+      
+    case 'success':
+      // Вызываем существующую логику отрисовки, передавая актуальные данные
+      updateView(); 
+      break;
+      
+    case 'error':
+      bookList.innerHTML = '';
+      const errorDiv = document.createElement('div');
+      errorDiv.style.color = 'red';
+      errorDiv.style.padding = '20px';
+      errorDiv.style.textAlign = 'center';
+      errorDiv.innerHTML = `
+        <p>${state.message}</p>
+        <button id="retryBtn" style="padding: 8px 16px; cursor: pointer; margin-top: 10px;">Повторить попытку</button>
+      `;
+      bookList.appendChild(errorDiv);
+      
+      // Задание 5: Кнопка «Повторить»
+      document.getElementById('retryBtn')?.addEventListener('click', () => {
+        initApp();
+      });
+      break;
+  }
 }
 
-const savedWishlist = localStorage.getItem('wishlist');
-if (savedWishlist) {
-  wishlist = new Wishlist(JSON.parse(savedWishlist));
+
+async function initApp() {
+  state = { status: 'loading' };
+  render();
+
+  try {
+    const books = await fetchBooks();
+    catalog = new BookCatalog('main', books);
+    state = { status: 'success', data: books };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Неизвестная ошибка';
+    state = { status: 'error', message };
+  }
+
+  render();
 }
 
-// ============================================================
-// СОХРАНЕНИЕ (в практике 4-1 переедет в mock-api.ts)
-// ============================================================
-function saveCatalog() {
-  localStorage.setItem('catalog', JSON.stringify({
-    id: catalog.id,
-    books: catalog.getBooks()
-  }));
-}
+// Запуск при загрузке страницы
+initApp();
 
-function saveWishlist() {
-  localStorage.setItem('wishlist', JSON.stringify(wishlist.getFavoriteIds()));
-}
 
 // ============================================================
 // DOM-элементы
@@ -75,20 +124,36 @@ function createBookCard(book: Book): HTMLDivElement {
   // Кнопка «Удалить»
   const deleteBtn = document.createElement('button');
   deleteBtn.textContent = 'Удалить';
-  deleteBtn.addEventListener('click', () => {
-    catalog.removeBook(book.id);
-    saveCatalog();
-    updateView();
+  deleteBtn.addEventListener('click', async () => {
+    if (state.status !== 'success') return;
+    
+    try {
+      catalog.removeBook(book.id);
+      const newBooksArray = catalog.getBooks();
+      
+      await saveBooks(newBooksArray);
+      
+      state = { status: 'success', data: newBooksArray };
+      render();
+    } catch (error) {
+      formErrorMessage = error instanceof Error ? error.message : 'Ошибка удаления книги';
+      render();
+      setTimeout(() => {
+        formErrorMessage = '';
+        render();
+      }, 3000);
+    }
   });
   card.append(deleteBtn);
 
-  // Кнопка «Избранное» 
+  // Кнопка «Избранное»
   const favBtn = document.createElement('button');
   favBtn.textContent = wishlist.has(book.id) ? '❤️ В избранном' : '🤍 В избранное';
   favBtn.addEventListener('click', () => {
     wishlist.toggle(book.id);
-    saveWishlist();
-    updateView();
+    // Wishlist храним локально, как в исходном коде, но перерисовываем
+    localStorage.setItem('wishlist', JSON.stringify(wishlist.getFavoriteIds()));
+    renderWishlist();
   });
   card.append(favBtn);
 
@@ -140,26 +205,39 @@ function updateView() {
   renderWishlist();
 }
 
-// Первичная отрисовка
-updateView();
-
 // ============================================================
 // ОБРАБОТЧИК ФОРМЫ
 // ============================================================
-form.addEventListener('submit', (e) => {
+form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  errorMessage.textContent = '';
+  formErrorMessage = ''; // Сброс перед новой попыткой
+  render();
+
+  if (state.status !== 'success') return;
+
   try {
     const formData = new FormData(form);
     const newBook = createBookFromForm(formData);
-    catalog.addBook(newBook);
-    saveCatalog();
+
+    const currentBooks = state.data;
+    const newBooksArray = [...currentBooks, newBook];
+
+    await saveBooks(newBooksArray);
+
+    // Успех: обновляем модель и состояние
+    catalog = new BookCatalog('main', newBooksArray);
+    state = { status: 'success', data: newBooksArray };
     form.reset();
-    updateView();
+    render();
   } catch (error) {
-    if (error instanceof Error) {
-      errorMessage.textContent = error.message;
-    }
+    // Обработка ошибок сохранения (не меняем status на 'error', чтобы не потерять список)
+    formErrorMessage = error instanceof Error ? error.message : 'Ошибка сохранения книги';
+    render();
+    
+    setTimeout(() => {
+      formErrorMessage = '';
+      render();
+    }, 3000);
   }
 });
 
